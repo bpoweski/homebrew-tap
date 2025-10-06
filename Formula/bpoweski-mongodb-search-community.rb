@@ -6,9 +6,20 @@ class BpoweskiMongodbSearchCommunity < Formula
   license ""
 
   depends_on "mongodb-community"
-  depends_on "openjdk"
+  depends_on "openjdk@21"
 
   def install
+    # Patch the mongot script to use Homebrew's OpenJDK instead of bundled JDK
+    inreplace "mongot" do |s|
+      # Replace the DIR variable and JAVA_HOME setup
+      s.gsub!('DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', '')
+      s.gsub!(/if \[\[ \$OSTYPE == "darwin"\* \]\]; then\n  export JAVA_HOME="\$\{DIR\}\/bin\/jdk\/Contents\/Home"\nelse\n  export JAVA_HOME="\$\{DIR\}\/bin\/jdk"\nfi/,
+              "export JAVA_HOME=\"#{Formula["openjdk@21"].opt_prefix}/libexec/openjdk.jdk/Contents/Home\"")
+      # Update classpath to use absolute paths
+      s.gsub!('-cp "${DIR}/lib/*:${DIR}/bin/mongot_community_deploy.jar"',
+              "-cp \"#{prefix}/lib/*:#{bin}/mongot_community_deploy.jar\"")
+    end
+
     bin.install "mongot"
     bin.install "bin/mongot_community_deploy.jar"
     prefix.install "config.default.yml"
@@ -24,6 +35,8 @@ class BpoweskiMongodbSearchCommunity < Formula
       syncSource:
         replicaSet:
           hostAndPort: "localhost:27017"
+          username: mongotUser
+          passwordFile: "#{etc}/mongot/passwordFile"
           tls: false
       storage:
         dataPath: "#{var}/lib/mongot"
@@ -45,7 +58,41 @@ class BpoweskiMongodbSearchCommunity < Formula
   def post_install
     (var/"lib/mongot").mkpath
     (var/"log/mongot").mkpath
+    (etc/"mongot").mkpath
+
+    # Create password file with restricted permissions
+    password_file = etc/"mongot/passwordFile"
+    unless password_file.exist?
+      password_file.write("mongotUser")
+      password_file.chmod(0600)  # Owner read/write only
+    end
+
     (etc/"mongot.yml").write mongot_conf unless File.exist?(etc/"mongot.yml")
+
+    # Print setup instructions
+    ohai "MongoDB User Setup Required"
+    puts <<~EOS
+      Before starting mongot, you need to create the mongotUser in MongoDB:
+
+      1. Connect to your MongoDB instance:
+         mongosh --port 27017
+
+      2. Create the mongotUser in the admin database:
+         use admin
+         db.createUser({
+           user: "mongotUser",
+           pwd: "mongotUser",
+           roles: [
+             { role: "readAnyDatabase", db: "admin" },
+             { role: "clusterMonitor", db: "admin" }
+           ]
+         })
+
+      3. Update the password in #{etc}/mongot/passwordFile if desired
+
+      4. Start mongot:
+         brew services start #{name}
+    EOS
   end
 
   service do
